@@ -5,7 +5,7 @@
  * plak je de URL van die Worker hieronder bij DEFAULT_WORKER_URL.
  * Dan werkt de website meteen voor elke bezoeker zonder dat iemand iets hoeft in te stellen!
  */
-const DEFAULT_WORKER_URL = ''; // Bijv. 'https://vrtmax-downloader.jouwnaam.workers.dev'
+const DEFAULT_WORKER_URL = 'https://vrtmax-downloader.robberttus.workers.dev';
 
 const STORAGE_WORKER_KEY = 'vrtmax_worker_url';
 
