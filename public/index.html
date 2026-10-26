@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VRT MAX Video & Ondertitels Downloader</title>
+  <meta name="description" content="Plak een VRT MAX link, kies de gewenste beeldkwaliteit en/of ondertitels (.srt / .vtt) en download direct de aflevering." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="bg-glow bg-glow-1"></div>
+  <div class="bg-glow bg-glow-2"></div>
+
+  <header class="site-header">
+    <div class="container header-inner">
+      <div class="brand">
+        <span class="brand-badge">VRT MAX</span>
+        <span class="brand-title">Stream &amp; Subtitle Downloader</span>
+      </div>
+      <button id="openConfigBtn" class="btn-icon" title="Backend Worker URL instellen" aria-label="Instellingen">
+        ⚙️ <span class="btn-icon-label">API Instellingen</span>
+      </button>
+    </div>
+  </header>
+
+  <main class="container main-content">
+    <!-- STAP 1: LINK PLAKKEN & INLADEN -->
+    <section class="card hero-card">
+      <div class="step-pill">Stap 1 — Aflevering opzoeken</div>
+      <h1>Download gelijk welk VRT MAX programma</h1>
+      <p class="subtitle">
+        Plak hieronder de link van een aflevering op <strong>VRT MAX</strong> en klik op <strong>Inladen</strong> om de beschikbare beeldkwaliteiten en ondertitels op te halen.
+      </p>
+
+      <form id="inspectForm" class="url-form">
+        <div class="input-wrapper">
+          <span class="input-icon">🔗</span>
+          <input
+            type="url"
+            id="vrtUrlInput"
+            placeholder="https://www.vrt.be/vrtmax/a-z/thuis/32/thuis-s32a6110/"
+            required
+            autocomplete="off"
+          />
+          <button type="button" id="pasteBtn" class="btn-paste" title="Plak van klembord">Plakken</button>
+        </div>
+        <button type="submit" id="inspectBtn" class="btn-primary">
+          <span class="btn-text">Inladen</span>
+          <span class="btn-arrow">→</span>
+        </button>
+      </form>
+
+      <!-- Laadstatus tijdens Inladen -->
+      <div id="inspectProgressBox" class="progress-box hidden">
+        <div class="progress-header">
+          <div class="spinner"></div>
+          <div>
+            <h3 id="inspectStatusTitle">Verbinden met VRT MAX via GitHub Actions...</h3>
+            <p id="inspectStatusSub" class="progress-sub">
+              De virtuele browser logt in en zoekt de videostream en ondertitels (duurt meestal 25–45 seconden).
+            </p>
+          </div>
+        </div>
+        <div class="progress-bar-track">
+          <div id="inspectProgressBar" class="progress-bar-fill" style="width: 15%"></div>
+        </div>
+        <div class="progress-steps">
+          <span id="stepQueue" class="step-item active">1. Opdracht gestart</span>
+          <span id="stepBrowser" class="step-item">2. Stream &amp; login ophalen</span>
+          <span id="stepFormats" class="step-item">3. Kwaliteiten &amp; ondertitels klaarzetten</span>
+        </div>
+      </div>
+
+      <!-- Foutmelding -->
+      <div id="errorAlert" class="alert alert-error hidden">
+        <strong>⚠️ Er ging iets mis:</strong>
+        <span id="errorMessage"></span>
+      </div>
+    </section>
+
+    <!-- STAP 2: RESULTAAT, OPTIES AANVINKEN & DOWNLOADEN -->
+    <section id="resultSection" class="card result-card hidden">
+      <div class="step-pill">Stap 2 — Kies je opties &amp; download</div>
+
+      <!-- Afleveringsinformatie -->
+      <div class="episode-banner">
+        <img id="epThumbnail" class="episode-thumb" src="" alt="Aflevering thumbnail" />
+        <div class="episode-meta">
+          <div class="episode-badges">
+            <span id="epProgramBadge" class="meta-badge">VRT MAX</span>
+            <span id="epDurationBadge" class="meta-badge meta-badge-muted"></span>
+            <span id="epDateBadge" class="meta-badge meta-badge-muted"></span>
+          </div>
+          <h2 id="epTitle">Aflevering titel</h2>
+          <p id="epDescription" class="episode-desc"></p>
+        </div>
+      </div>
+
+      <div id="drmWarning" class="alert alert-warning hidden">
+        <strong>🔒 Let op (DRM-beveiliging gedetecteerd):</strong>
+        <span>Dit specifieke programma heeft extra DRM-kopieerbeveiliging op de videostream. Ondertitels zijn wél gewoon te downloaden, maar de video zelf kan door VRT geblokkeerd zijn.</span>
+      </div>
+
+      <!-- Aanvinkbare Opties Grid -->
+      <div class="options-grid">
+        <!-- Kolom 1: Beeldkwaliteit / Video -->
+        <div class="option-panel" id="videoOptionPanel">
+          <label class="panel-toggle">
+            <input type="checkbox" id="checkDownloadVideo" checked />
+            <span class="custom-checkbox"></span>
+            <div class="panel-toggle-text">
+              <strong>🎬 Video / Audio downloaden</strong>
+              <span>Download de aflevering als kant-en-klaar MP4 of M4A audiobestand</span>
+            </div>
+          </label>
+
+          <div id="qualityListContainer" class="panel-body">
+            <div class="field-label">Kies de gewenste beeldkwaliteit:</div>
+            <div id="qualitiesList" class="radio-cards">
+              <!-- Dynamisch gevuld met gevonden resoluties (1080p, 720p, 540p, etc.) -->
+            </div>
+
+            <label class="sub-embed-toggle" id="embedSubsWrapper">
+              <input type="checkbox" id="checkEmbedSubs" />
+              <span>Ondertitels ook meteen insluiten in het MP4-videobestand</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Kolom 2: Ondertitels -->
+        <div class="option-panel" id="subtitleOptionPanel">
+          <label class="panel-toggle">
+            <input type="checkbox" id="checkDownloadSubs" checked />
+            <span class="custom-checkbox"></span>
+            <div class="panel-toggle-text">
+              <strong>💬 Ondertitels downloaden</strong>
+              <span id="subtitleAvailabilityText">Direct beschikbaar zonder wachttijd!</span>
+            </div>
+          </label>
+
+          <div id="subtitleOptionsBody" class="panel-body">
+            <div class="field-label">Kies het gewenste ondertitelformaat:</div>
+            <div class="sub-format-checks">
+              <label class="format-check-card">
+                <input type="checkbox" id="checkSubSrt" checked />
+                <div>
+                  <strong>.SRT bestand (SubRip)</strong>
+                  <span>Standaard formaat voor VLC, mediaspelers &amp; videobewerking</span>
+                </div>
+              </label>
+
+              <label class="format-check-card">
+                <input type="checkbox" id="checkSubVtt" />
+                <div>
+                  <strong>.VTT bestand (WebVTT)</strong>
+                  <span>Origineel webformaat van de VRT MAX speler</span>
+                </div>
+              </label>
+            </div>
+
+            <div id="subtitlePreviewBox" class="sub-preview-box hidden">
+              <div class="sub-preview-header">
+                <span>Voorbeeld van gevonden ondertitels:</span>
+                <span class="badge-ready">✓ Klaar voor directe download</span>
+              </div>
+              <pre id="subtitlePreviewText"></pre>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Download Actiebalk -->
+      <div class="download-action-bar">
+        <div id="selectionSummary" class="selection-summary">
+          Geselecteerd: <strong>1080p Full HD (.mp4)</strong> + <strong>Ondertitels (.srt)</strong>
+        </div>
+        <button type="button" id="downloadBtn" class="btn-download">
+          <span>⬇️ Download geselecteerde opties</span>
+        </button>
+      </div>
+
+      <!-- Voortgang tijdens Video Download -->
+      <div id="downloadProgressBox" class="progress-box hidden">
+        <div class="progress-header">
+          <div class="spinner"></div>
+          <div>
+            <h3 id="downloadStatusTitle">Video wordt gedownload en samengevoegd met yt-dlp...</h3>
+            <p id="downloadStatusSub" class="progress-sub">
+              Even geduld: GitHub Actions downloadt alle segmenten op hoge snelheid en maakt één .mp4 bestand klaar.
+            </p>
+          </div>
+        </div>
+        <div class="progress-bar-track">
+          <div id="downloadProgressBar" class="progress-bar-fill" style="width: 20%"></div>
+        </div>
+      </div>
+
+      <!-- Klaar om te downloaden box -->
+      <div id="downloadReadyBox" class="download-ready-box hidden">
+        <div class="ready-info">
+          <span class="ready-icon">🎉</span>
+          <div>
+            <h3 id="readyTitle">Je download is helemaal klaar!</h3>
+            <p id="readyMeta">Het bestand is automatisch gestart of klik hiernaast om het op te slaan.</p>
+          </div>
+        </div>
+        <a id="directDownloadLink" href="#" class="btn-ready-link" target="_blank" rel="noopener">
+          💾 Opslaan op apparaat
+        </a>
+      </div>
+
+      <!-- Geavanceerd: Directe stream link & yt-dlp commando voor gevorderden -->
+      <details class="advanced-details">
+        <summary>🛠️ Geavanceerd: Directe .m3u8 stream-link &amp; lokaal yt-dlp commando bekijken</summary>
+        <div class="advanced-body">
+          <div class="adv-row">
+            <label>Gevonden .m3u8 stream URL:</label>
+            <div class="copy-group">
+              <input type="text" id="rawM3u8Input" readonly />
+              <button type="button" id="copyM3u8Btn" class="btn-secondary">Kopieer URL</button>
+            </div>
+          </div>
+          <div class="adv-row">
+            <label>Lokaal yt-dlp commando (voor eigen terminal):</label>
+            <div class="copy-group">
+              <input type="text" id="rawYtdlpCmdInput" readonly />
+              <button type="button" id="copyCmdBtn" class="btn-secondary">Kopieer commando</button>
+            </div>
+          </div>
+        </div>
+      </details>
+    </section>
+  </main>
+
+  <!-- Modal voor Cloudflare Worker URL configuratie -->
+  <div id="configModal" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>⚙️ API Worker Verbinding</h3>
+        <button type="button" id="closeConfigBtn" class="btn-close">✕</button>
+      </div>
+      <p class="modal-desc">
+        Vul hier de URL van je gratis <strong>Cloudflare Worker</strong> in (of stel <code>DEFAULT_WORKER_URL</code> eenmalig vast in <code>public/app.js</code> zodat bezoekers dit nooit hoeven in te vullen).
+      </p>
+      <label class="field-label" for="workerUrlInput">Cloudflare Worker URL:</label>
+      <input
+        type="url"
+        id="workerUrlInput"
+        class="modal-input"
+        placeholder="https://vrtmax-downloader.jouwnaam.workers.dev"
+      />
+      <div class="modal-actions">
+        <button type="button" id="saveConfigBtn" class="btn-primary">Opslaan</button>
+      </div>
+    </div>
+  </div>
+
+  <footer class="site-footer">
+    <div class="container">
+      <p>Aangedreven door Playwright &amp; yt-dlp via GitHub Actions • Enkel voor persoonlijk gebruik met een geldig VRT MAX account.</p>
+    </div>
+  </footer>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

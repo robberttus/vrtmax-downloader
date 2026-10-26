@@ -1,0 +1,142 @@
+name: VRT MAX Stream & Video Downloader
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Actie modus: inspect (Inladen) of download (Downloaden)'
+        required: true
+        default: 'inspect'
+      job_id:
+        description: 'Uniek Job ID voor deze aanvraag'
+        required: true
+      vrt_url:
+        description: 'De geplakte VRT MAX link'
+        required: false
+        default: ''
+      m3u8_url:
+        description: 'Reeds gevonden .m3u8 stream link (voor snelle download zonder browser)'
+        required: false
+        default: ''
+      quality_id:
+        description: 'Gekozen beeldkwaliteit ID (bijv. video-1080p, video-720p, audio-only)'
+        required: false
+        default: 'video-1080p'
+      video_height:
+        description: 'Maximale resolutie hoogte (bijv. 1080, 720, 540, 360)'
+        required: false
+        default: '1080'
+      audio_only:
+        description: 'Enkel audio downloaden (true/false)'
+        required: false
+        default: 'false'
+      embed_subs:
+        description: 'Ondertitels inbakken in het MP4 bestand (true/false)'
+        required: false
+        default: 'false'
+      episode_title:
+        description: 'Titel van de aflevering voor een nette bestandsnaam'
+        required: false
+        default: 'VRT_MAX_Aflevering'
+
+permissions:
+  contents: write
+
+jobs:
+  process-vrt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Cache VRT MAX loginsessie (.auth/vrt-state.json)
+        uses: actions/cache@v4
+        with:
+          path: .auth
+          key: vrt-auth-session-v1-${{ github.run_id }}
+          restore-keys: |
+            vrt-auth-session-v1-
+
+      - name: Cache Playwright Chromium browser
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      - name: Installeer dependencies & Playwright ( enkel indien nodig voor inspect )
+        run: |
+          npm install
+          if [ "${{ inputs.mode }}" = "inspect" ] || [ -z "${{ inputs.m3u8_url }}" ]; then
+            if [ "${{ steps.playwright-cache.outputs.cache-hit }}" != "true" ]; then
+              npx playwright install --with-deps chromium
+            else
+              npx playwright install-deps chromium
+            fi
+          fi
+
+      - name: Installeer yt-dlp
+        run: |
+          sudo curl -sSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+          sudo chmod a+rx /usr/local/bin/yt-dlp
+
+      - name: Voer VRT MAX actie uit (Inladen of Downloaden)
+        id: run_vrt
+        continue-on-error: true
+        env:
+          VRT_EMAIL: ${{ secrets.VRT_EMAIL }}
+          VRT_PASSWORD: ${{ secrets.VRT_PASSWORD }}
+          ACTION_MODE: ${{ inputs.mode }}
+          JOB_ID: ${{ inputs.job_id }}
+          VRT_URL: ${{ inputs.vrt_url }}
+          M3U8_URL: ${{ inputs.m3u8_url }}
+          QUALITY_ID: ${{ inputs.quality_id }}
+          VIDEO_HEIGHT: ${{ inputs.video_height }}
+          AUDIO_ONLY: ${{ inputs.audio_only }}
+          EMBED_SUBS: ${{ inputs.embed_subs }}
+          EPISODE_TITLE: ${{ inputs.episode_title }}
+        run: node scripts/run-action.mjs
+
+      - name: Publiceer resultaat & bestanden naar tijdelijke GitHub Release (downloads-cache)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          JOB_ID: ${{ inputs.job_id }}
+        run: |
+          # Maak de 'downloads-cache' release aan als deze nog niet bestaat
+          if ! gh release view downloads-cache >/dev/null 2>&1; then
+            gh release create downloads-cache --title "Tijdelijke VRT MAX Downloads" --notes "Automatische tijdelijke opslag voor de VRT MAX Downloader webapplicatie. Bestanden ouder dan 3 uur worden automatisch verwijderd." --prerelease
+          fi
+
+          # Ruim bestanden ouder dan 3 uur automatisch op zodat de release altijd schoon blijft
+          node -e '
+            const { execSync } = require("node:child_process");
+            try {
+              const raw = execSync("gh api repos/${{ github.repository }}/releases/tags/downloads-cache", { encoding: "utf-8" });
+              const rel = JSON.parse(raw);
+              const threeHoursAgo = Date.now() - 3 * 60 * 60 * 1000;
+              for (const asset of rel.assets || []) {
+                if (new Date(asset.updated_at).getTime() < threeHoursAgo) {
+                  console.log("Opruimen van verlopen bestand:", asset.name);
+                  execSync(`gh release delete-asset downloads-cache "${asset.name}" -y`);
+                }
+              }
+            } catch (e) {
+              console.warn("Opruim-check overgeslagen:", e.message);
+            }
+          '
+
+          # Upload alle gegenereerde bestanden uit output/ (.json, .mp4, .m4a, .srt)
+          shopt -s nullglob
+          files=(output/*)
+          if [ ${#files[@]} -gt 0 ]; then
+            gh release upload downloads-cache output/* --clobber
+          fi
