@@ -74,7 +74,7 @@ jobs:
 
       - name: Installeer dependencies & Playwright ( enkel indien nodig voor inspect )
         run: |
-          npm install
+          npm ci
           if [ "${{ inputs.mode }}" = "inspect" ] || [ -z "${{ inputs.m3u8_url }}" ]; then
             if [ "${{ steps.playwright-cache.outputs.cache-hit }}" != "true" ]; then
               npx playwright install --with-deps chromium
@@ -85,7 +85,7 @@ jobs:
 
       - name: Installeer yt-dlp
         run: |
-          sudo curl -sSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+          sudo curl -sSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux -o /usr/local/bin/yt-dlp
           sudo chmod a+rx /usr/local/bin/yt-dlp
 
       - name: Voer VRT MAX actie uit (Inladen of Downloaden)
@@ -117,7 +117,7 @@ jobs:
           fi
 
           # Ruim bestanden ouder dan 3 uur automatisch op zodat de release altijd schoon blijft
-          node -e '
+          node --input-type=commonjs -e '
             const { execSync } = require("node:child_process");
             try {
               const raw = execSync("gh api repos/${{ github.repository }}/releases/tags/downloads-cache", { encoding: "utf-8" });
