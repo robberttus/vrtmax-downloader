@@ -1,9 +1,5 @@
 /**
  * VRT MAX Video & Ondertitels Downloader — Frontend Logica (GitHub Pages)
- *
- * TIP: Zodra je jouw gratis Cloudflare Worker hebt aangemaakt (zie het stappenplan in README.md),
- * plak je de URL van die Worker hieronder bij DEFAULT_WORKER_URL.
- * Dan werkt de website meteen voor elke bezoeker zonder dat iemand iets hoeft in te stellen!
  */
 const DEFAULT_WORKER_URL = 'https://vrtmax-downloader.robberttus.workers.dev';
 
@@ -116,12 +112,229 @@ function formatDate(iso) {
   }
 }
 
+function convertVttToSrt(vttText) {
+  if (!vttText) return '';
+  const cleaned = vttText
+    .replace(/\r\n/g, '\n')
+    .replace(/^WEBVTT[^\n]*\n+/gim, '')
+    .replace(/^X-TIMESTAMP-MAP[^\n]*\n+/gim, '')
+    .replace(/^STYLE[\s\S]*?\n\n/gim, '')
+    .replace(/^NOTE[\s\S]*?\n\n/gim, '');
+
+  const blocks = cleaned
+    .split(/\n{2,}/)
+    .map((b) => b.trim())
+    .filter(Boolean);
+
+  const srtBlocks = [];
+  let index = 1;
+  const seenCues = new Set();
+
+  for (const block of blocks) {
+    const lines = block.split('\n').map((l) => l.trim());
+    const timeLineIdx = lines.findIndex((l) => l.includes('-->'));
+    if (timeLineIdx === -1) continue;
+
+    const timeLine = lines[timeLineIdx]
+      .replace(/(\d{2}:\d{2}:\d{2})\.(\d{3})/g, '$1,$2')
+      .replace(/\b(\d{2}:\d{2})\.(\d{3})/g, '00:$1,$2')
+      .replace(/(-->\s*\d{2}:\d{2}:\d{2},\d{3}).*$/, '$1');
+
+    const textLines = lines
+      .slice(timeLineIdx + 1)
+      .join('\n')
+      .replace(/<[^>]+>/g, '')
+      .trim();
+
+    if (!textLines) continue;
+    const dedupKey = `${timeLine}|${textLines}`;
+    if (seenCues.has(dedupKey)) continue;
+    seenCues.add(dedupKey);
+
+    srtBlocks.push(`${index}\n${timeLine}\n${textLines}`);
+    index++;
+  }
+
+  return srtBlocks.join('\n\n') + '\n';
+}
+
 function srtToVtt(srtText) {
   if (!srtText) return '';
   const body = srtText
     .replace(/\r\n/g, '\n')
     .replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
   return `WEBVTT\n\n${body}`;
+}
+
+/**
+ * Lost voor programma's met Belgisch geoblock (zoals F*ck you, flik) de .m3u8 stream,
+ * beeldkwaliteiten en .srt ondertitels rechtstreeks vanuit de Belgische browser van de bezoeker op!
+ */
+async function resolveStreamInBelgianBrowser(jobData) {
+  if (jobData.m3u8Url && jobData.qualities?.length > 0) {
+    return jobData;
+  }
+
+  if (!jobData.streamId || !jobData.identityToken) {
+    throw new Error('Kon geen geldige streamId of VRT-sessie vinden voor deze aflevering.');
+  }
+
+  inspectStatusTitle.textContent = 'Stream & ondertitels ophalen via jouw Belgische verbinding...';
+
+  // 1. Wissel identityToken in voor een Belgische vrtPlayerToken
+  const tokenRes = await fetch(
+    'https://media-services-public.vrt.be/vualto-video-aggregator-web/rest/external/v2/tokens',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ identityToken: jobData.identityToken }),
+    }
+  );
+  if (!tokenRes.ok) {
+    throw new Error(`VRT speler-token aanvraag mislukt (${tokenRes.status}).`);
+  }
+  const tokenData = await tokenRes.json();
+  if (!tokenData.vrtPlayerToken) {
+    throw new Error('Kon geen vrtPlayerToken ontvangen van VRT MAX.');
+  }
+
+  // 2. Vraag de stream-URLs op bij VRT media-aggregator
+  const mediaUrl = `https://media-services-public.vrt.be/media-aggregator/v2/media-items/${encodeURIComponent(
+    jobData.streamId
+  )}?client=vrtnu-web%40PROD&vrtPlayerToken=${encodeURIComponent(tokenData.vrtPlayerToken)}`;
+
+  const mediaRes = await fetch(mediaUrl);
+  const mediaData = await mediaRes.json().catch(() => ({}));
+
+  if (!mediaRes.ok || !Array.isArray(mediaData.targetUrls)) {
+    throw new Error(
+      mediaData.code
+        ? `VRT MAX weigerde de stream (${mediaData.code}).`
+        : 'Kon geen videostream vinden voor deze aflevering.'
+    );
+  }
+
+  const hls = mediaData.targetUrls.find((t) => t.type === 'hls' || t.url?.includes('.m3u8'));
+  const dash = mediaData.targetUrls.find((t) => t.type === 'mpeg_dash' || t.url?.includes('.mpd'));
+  const chosen = hls || dash || mediaData.targetUrls[0];
+
+  if (!chosen?.url) {
+    throw new Error('Geen .m3u8 of .mpd link aanwezig in VRT MAX antwoord.');
+  }
+
+  const m3u8Url = chosen.url.replace(/\.mpd.*$/, '.m3u8').replace(/\.m3u8\?.*$/, '.m3u8');
+  let drmDetected = Boolean(mediaData.drm);
+  const durationSeconds =
+    jobData.metadata?.durationSeconds ||
+    (mediaData.duration ? Math.round(mediaData.duration / 1000) : null);
+
+  // 3. Lees het .m3u8 master manifest uit voor alle resoluties én ondertitels
+  const qualitiesMap = new Map();
+  let srtContent = null;
+
+  const masterRes = await fetch(m3u8Url);
+  if (masterRes.ok) {
+    const masterText = await masterRes.text();
+    if (masterText.includes('METHOD=SAMPLE-AES') || masterText.includes('fairplay-license')) {
+      drmDetected = true;
+    }
+
+    const lines = masterText.split(/\r?\n/);
+    for (const line of lines) {
+      if (line.startsWith('#EXT-X-STREAM-INF:')) {
+        const resMatch = line.match(/RESOLUTION=(\d+)x(\d+)/i);
+        const bwMatch = line.match(/BANDWIDTH=(\d+)/i);
+        if (resMatch) {
+          const w = Number(resMatch[1]);
+          const h = Number(resMatch[2]);
+          const tbr = bwMatch ? Math.round(Number(bwMatch[1]) / 1000) : 0;
+          const existing = qualitiesMap.get(h);
+          if (!existing || tbr > existing.tbr) {
+            qualitiesMap.set(h, {
+              id: `video-${h}p`,
+              height: h,
+              width: w,
+              label: h >= 1080 ? `${h}p Full HD` : h >= 720 ? `${h}p HD` : `${h}p SD`,
+              resolution: `${w}x${h}`,
+              tbr,
+              estimatedSizeMb:
+                durationSeconds && tbr
+                  ? Math.round((tbr * 1000 * durationSeconds) / 8 / (1024 * 1024))
+                  : null,
+            });
+          }
+        }
+      }
+    }
+
+    // 4. Haal het WebVTT ondertitelspoor direct op in de browser
+    const baseUrl = m3u8Url.substring(0, m3u8Url.lastIndexOf('/') + 1);
+    const subMatch = masterText.match(/#EXT-X-MEDIA:[^\r\n]*TYPE=SUBTITLES[^\r\n]*URI="([^"]+)"/i);
+    if (subMatch) {
+      inspectStatusTitle.textContent = 'Nederlandse ondertitels downloaden en samenvoegen...';
+      const subPlaylistUrl = new URL(subMatch[1], baseUrl).href;
+      const subPlaylistRes = await fetch(subPlaylistUrl);
+      if (subPlaylistRes.ok) {
+        const subPlaylistText = await subPlaylistRes.text();
+        const subBaseUrl = subPlaylistUrl.substring(0, subPlaylistUrl.lastIndexOf('/') + 1);
+        const segmentUrls = subPlaylistText
+          .split(/\r?\n/)
+          .map((l) => l.trim())
+          .filter((l) => l && !l.startsWith('#'))
+          .map((l) => new URL(l, subBaseUrl).href);
+
+        const parts = [];
+        const batchSize = 15;
+        for (let i = 0; i < segmentUrls.length; i += batchSize) {
+          const batch = segmentUrls.slice(i, i + batchSize);
+          const texts = await Promise.all(
+            batch.map(async (segUrl) => {
+              const segRes = await fetch(segUrl);
+              return segRes.ok ? await segRes.text() : '';
+            })
+          );
+          parts.push(...texts.filter(Boolean));
+        }
+
+        const combinedVtt = parts.join('\n\n');
+        const converted = convertVttToSrt(combinedVtt);
+        if (converted.trim().length > 20) {
+          srtContent = converted;
+        }
+      }
+    }
+  }
+
+  const qualities = Array.from(qualitiesMap.values()).sort((a, b) => b.height - a.height);
+  qualities.push({
+    id: 'audio-only',
+    height: 0,
+    width: 0,
+    label: 'Enkel Audio (M4A)',
+    resolution: 'Audio',
+    tbr: 128,
+    audioOnly: true,
+    estimatedSizeMb: durationSeconds
+      ? Math.max(1, Math.round((128 * 1000 * durationSeconds) / 8 / (1024 * 1024)))
+      : null,
+  });
+
+  return {
+    ...jobData,
+    metadata: {
+      ...jobData.metadata,
+      durationSeconds,
+    },
+    m3u8Url,
+    mpdUrl: chosen.url,
+    drmDetected,
+    qualities,
+    subtitles: {
+      available: Boolean(srtContent),
+      languages: srtContent ? [{ code: 'nl', label: 'Nederlands (.srt & .vtt)' }] : [],
+      srtContent,
+    },
+  };
 }
 
 function triggerBrowserTextDownload(content, filename, mimeType = 'text/plain;charset=utf-8') {
@@ -244,6 +457,8 @@ function renderInspectResult(data) {
   }
 
   drmWarning.classList.toggle('hidden', !data.drmDetected);
+  // Als de video DRM-beveiligd is, vink standaard alleen de ondertitels aan
+  checkDownloadVideo.checked = !data.drmDetected;
 
   // Render beeldkwaliteiten
   qualitiesList.innerHTML = '';
@@ -304,10 +519,10 @@ function renderInspectResult(data) {
 // Poll een jobId bij de Cloudflare Worker tot status READY of ERROR is
 async function pollJobUntilDone(workerUrl, jobId, onTick) {
   const startTime = Date.now();
-  const maxWaitMs = 20 * 60 * 1000; // Max 20 minuten voor grote downloads
+  const maxWaitMs = 20 * 60 * 1000;
 
   while (Date.now() - startTime < maxWaitMs) {
-    await new Promise((r) => setTimeout(r, 3500));
+    await new Promise((r) => setTimeout(r, 2500));
 
     const elapsedSec = Math.round((Date.now() - startTime) / 1000);
     if (onTick) onTick(elapsedSec);
@@ -354,7 +569,7 @@ inspectForm.addEventListener('submit', async (e) => {
   inspectBtn.disabled = true;
   resultSection.classList.add('hidden');
   inspectProgressBox.classList.remove('hidden');
-  inspectProgressBar.style.width = '12%';
+  inspectProgressBar.style.width = '18%';
   stepQueue.classList.add('active');
   stepBrowser.classList.remove('active');
   stepFormats.classList.remove('active');
@@ -371,23 +586,27 @@ inspectForm.addEventListener('submit', async (e) => {
       throw new Error(startData.error || 'Kon de Inladen-actie niet starten.');
     }
 
-    const jobData = await pollJobUntilDone(workerUrl, startData.jobId, (elapsedSec) => {
-      const pct = Math.min(92, 15 + Math.round((elapsedSec / 40) * 75));
+    const rawJobData = await pollJobUntilDone(workerUrl, startData.jobId, (elapsedSec) => {
+      const pct = Math.min(88, 20 + Math.round((elapsedSec / 18) * 68));
       inspectProgressBar.style.width = `${pct}%`;
 
-      if (elapsedSec > 8) {
+      if (elapsedSec > 3) {
         stepBrowser.classList.add('active');
-        inspectStatusTitle.textContent = 'Headless browser logt in op VRT MAX en zoekt stream...';
+        inspectStatusTitle.textContent = 'VRT MAX sessie & aflevering ophalen...';
       }
-      if (elapsedSec > 20) {
+      if (elapsedSec > 8) {
         stepFormats.classList.add('active');
-        inspectStatusTitle.textContent = 'Beschikbare beeldkwaliteiten & ondertitels uitlezen met yt-dlp...';
+        inspectStatusTitle.textContent = 'Beeldkwaliteiten & ondertitels klaarzetten...';
       }
     });
 
+    // Als het een programma met Belgische IP-check is (zoals F*ck you, flik), los de stream & ondertitels
+    // nu direct vanuit de Belgische browser van de bezoeker op (< 1 seconde)!
+    const completeData = await resolveStreamInBelgianBrowser(rawJobData);
+
     inspectProgressBar.style.width = '100%';
     inspectProgressBox.classList.add('hidden');
-    renderInspectResult(jobData);
+    renderInspectResult(completeData);
   } catch (err) {
     inspectProgressBox.classList.add('hidden');
     showError(err.message || 'Er ging iets mis bij het inladen van de VRT MAX link.');
@@ -466,7 +685,6 @@ downloadBtn.addEventListener('click', async () => {
       directDownloadLink.href = doneData.downloadUrl;
       downloadReadyBox.classList.remove('hidden');
 
-      // Start de download ook meteen automatisch in de browser
       const autoLink = document.createElement('a');
       autoLink.href = doneData.downloadUrl;
       autoLink.download = doneData.fileName || '';

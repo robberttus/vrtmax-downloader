@@ -15,7 +15,7 @@ on:
         required: false
         default: ''
       m3u8_url:
-        description: 'Reeds gevonden .m3u8 stream link (voor snelle download zonder browser)'
+        description: 'Reeds gevonden .m3u8 stream link (voor snelle download)'
         required: false
         default: ''
       quality_id:
@@ -57,33 +57,19 @@ jobs:
           node-version: '22'
           cache: 'npm'
 
-      - name: Cache VRT MAX loginsessie (.auth/vrt-state.json)
+      - name: Cache VRT MAX loginsessie (.auth/vrt-token.json)
         uses: actions/cache@v4
         with:
           path: .auth
-          key: vrt-auth-session-v1-${{ github.run_id }}
+          key: vrt-auth-token-v2-${{ github.run_id }}
           restore-keys: |
-            vrt-auth-session-v1-
+            vrt-auth-token-v2-
 
-      - name: Cache Playwright Chromium browser
-        id: playwright-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      - name: Installeer dependencies
+        run: npm ci
 
-      - name: Installeer dependencies & Playwright ( enkel indien nodig voor inspect )
-        run: |
-          npm ci
-          if [ "${{ inputs.mode }}" = "inspect" ] || [ -z "${{ inputs.m3u8_url }}" ]; then
-            if [ "${{ steps.playwright-cache.outputs.cache-hit }}" != "true" ]; then
-              npx playwright install --with-deps chromium
-            else
-              npx playwright install-deps chromium
-            fi
-          fi
-
-      - name: Installeer yt-dlp
+      - name: Installeer yt-dlp (enkel nodig bij video/audio download)
+        if: inputs.mode == 'download'
         run: |
           sudo curl -sSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux -o /usr/local/bin/yt-dlp
           sudo chmod a+rx /usr/local/bin/yt-dlp

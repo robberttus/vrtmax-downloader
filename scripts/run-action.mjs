@@ -2,9 +2,9 @@ import 'dotenv/config';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
-  launchVrtBrowser,
-  ensureLoggedIn,
-  findVrtMaxStream,
+  getVrtVideoToken,
+  fetchEpisodeGraphqlInfo,
+  tryResolveStreamOnServer,
   inspectM3u8Qualities,
   extractSubtitlesFromM3u8,
   downloadMediaFromM3u8,
@@ -40,7 +40,7 @@ async function writeJobResult(jobId, payload) {
 }
 
 async function main() {
-  const mode = getArgOrEnv('mode', 'ACTION_MODE', 'inspect'); // 'inspect' of 'download'
+  const mode = getArgOrEnv('mode', 'ACTION_MODE', 'inspect');
   const jobId = getArgOrEnv('job-id', 'JOB_ID', `local-${Date.now()}`).replace(/[^a-zA-Z0-9_-]/g, '');
   const vrtUrl = getArgOrEnv('url', 'VRT_URL', '').trim();
   const providedM3u8 = getArgOrEnv('m3u8', 'M3U8_URL', '').trim();
@@ -67,47 +67,72 @@ async function main() {
         throw new Error('Geef een geldige VRT MAX link op (bijv. https://www.vrt.be/vrtmax/a-z/...).');
       }
 
-      let streamData = null;
-      const { browser, context, page } = await launchVrtBrowser({ headless: true });
-      try {
-        await ensureLoggedIn(page, context, { email, password });
-        streamData = await findVrtMaxStream(page, vrtUrl);
-      } finally {
-        await browser.close().catch(() => {});
-      }
-
-      const safeTitle = sanitizeFilename(
-        streamData.metadata.programTitle
-          ? `${streamData.metadata.programTitle} - ${streamData.metadata.title}`
-          : streamData.metadata.title
-      );
-
-      console.log('🔍 Beeldkwaliteiten en ondertitels tegelijk analyseren...');
-      const [qualityInfo, subInfo] = await Promise.all([
-        inspectM3u8Qualities(streamData.m3u8Url),
-        extractSubtitlesFromM3u8(streamData.m3u8Url, OUTPUT_DIR, `${jobId}-${safeTitle}`),
+      // Haal VRT MAX login-token én pagina-metadata tegelijk op (< 1 seconde!)
+      const [identityToken, gqlInfo] = await Promise.all([
+        getVrtVideoToken({ email, password }),
+        fetchEpisodeGraphqlInfo(vrtUrl),
       ]);
 
-      await writeJobResult(jobId, {
-        status: 'READY',
-        mode: 'inspect',
-        metadata: {
-          ...streamData.metadata,
-          durationSeconds: qualityInfo.durationSeconds,
-          safeFilename: safeTitle,
-        },
-        m3u8Url: streamData.m3u8Url,
-        mpdUrl: streamData.mpdUrl,
-        drmDetected: streamData.drmDetected,
-        qualities: qualityInfo.qualities,
-        subtitles: {
-          available: subInfo.hasSubtitles,
-          languages: subInfo.hasSubtitles ? [{ code: 'nl', label: 'Nederlands (.srt & .vtt)' }] : [],
-          srtContent: subInfo.srtContent || null,
-        },
-      });
+      const safeTitle = sanitizeFilename(
+        gqlInfo.metadata.programTitle
+          ? `${gqlInfo.metadata.programTitle} - ${gqlInfo.metadata.title}`
+          : gqlInfo.metadata.title
+      );
 
-      console.log('✅ Inladen van aflevering, kwaliteiten en ondertitels voltooid!');
+      // Probeer de stream alvast op de server op te lossen (werkt voor wereldwijde VRT-programma's zoals Thuis)
+      const serverStream = await tryResolveStreamOnServer(gqlInfo.streamId, identityToken);
+
+      if (serverStream.resolved && serverStream.m3u8Url) {
+        console.log('🔍 Stream op server gevonden, kwaliteiten en ondertitels uitlezen...');
+        const [qualityInfo, subInfo] = await Promise.all([
+          inspectM3u8Qualities(serverStream.m3u8Url, gqlInfo.metadata.durationSeconds),
+          extractSubtitlesFromM3u8(serverStream.m3u8Url, OUTPUT_DIR, `${jobId}-${safeTitle}`),
+        ]);
+
+        await writeJobResult(jobId, {
+          status: 'READY',
+          mode: 'inspect',
+          streamId: gqlInfo.streamId,
+          identityToken,
+          metadata: {
+            ...gqlInfo.metadata,
+            durationSeconds: qualityInfo.durationSeconds || gqlInfo.metadata.durationSeconds,
+            safeFilename: safeTitle,
+          },
+          m3u8Url: serverStream.m3u8Url,
+          mpdUrl: serverStream.mpdUrl,
+          drmDetected: serverStream.drmDetected,
+          qualities: qualityInfo.qualities,
+          subtitles: {
+            available: subInfo.hasSubtitles,
+            languages: subInfo.hasSubtitles ? [{ code: 'nl', label: 'Nederlands (.srt & .vtt)' }] : [],
+            srtContent: subInfo.srtContent || null,
+          },
+        });
+      } else {
+        // Voor programma's met Belgisch geoblock (zoals F*ck you, flik) geven we streamId + identityToken
+        // terug zodat de browser van de bezoeker (met Belgisch IP!) de .m3u8 en ondertitels zelf ophaalt in 0.5s!
+        await writeJobResult(jobId, {
+          status: 'READY',
+          mode: 'inspect',
+          needsClientStreamResolve: true,
+          streamId: gqlInfo.streamId,
+          identityToken,
+          metadata: {
+            ...gqlInfo.metadata,
+            safeFilename: safeTitle,
+          },
+          m3u8Url: null,
+          qualities: [],
+          subtitles: {
+            available: false,
+            languages: [],
+            srtContent: null,
+          },
+        });
+      }
+
+      console.log('✅ Inladen van VRT MAX gegevens voltooid!');
       return;
     }
 
@@ -115,20 +140,20 @@ async function main() {
       let m3u8Url = providedM3u8;
       let episodeTitle = providedTitle || 'VRT_MAX_Aflevering';
 
-      // Als er geen m3u8Url werd meegegeven, zoek deze dan eerst via Playwright
       if (!m3u8Url) {
         if (!vrtUrl) {
           throw new Error('Geen M3U8_URL of VRT_URL opgegeven voor download.');
         }
-        const { browser, context, page } = await launchVrtBrowser({ headless: true });
-        try {
-          await ensureLoggedIn(page, context, { email, password });
-          const streamData = await findVrtMaxStream(page, vrtUrl);
-          m3u8Url = streamData.m3u8Url;
-          episodeTitle = streamData.metadata.title || episodeTitle;
-        } finally {
-          await browser.close().catch(() => {});
+        const [identityToken, gqlInfo] = await Promise.all([
+          getVrtVideoToken({ email, password }),
+          fetchEpisodeGraphqlInfo(vrtUrl),
+        ]);
+        const serverStream = await tryResolveStreamOnServer(gqlInfo.streamId, identityToken);
+        if (!serverStream.resolved || !serverStream.m3u8Url) {
+          throw new Error('Kon de .m3u8 stream niet op de server openen.');
         }
+        m3u8Url = serverStream.m3u8Url;
+        episodeTitle = gqlInfo.metadata.title || episodeTitle;
       }
 
       const safeBaseName = `${jobId}-${sanitizeFilename(episodeTitle)}`;
