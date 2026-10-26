@@ -68,11 +68,23 @@ jobs:
       - name: Installeer dependencies
         run: npm ci
 
+      - name: Forceer snelle CloudFront/Fastly CDN voor VRT videostreams (omzeil defecte Orange CDN shard)
+        run: |
+          CF_IP=$(dig +short d1y59q8qknpa1w.cloudfront.net A | grep -E '^[0-9]+\.' | head -n 1)
+          if [ -n "$CF_IP" ]; then
+            echo "$CF_IP remix.vrtcdn.be" | sudo tee -a /etc/hosts
+          fi
+          FASTLY_IP=$(dig +short mbz100.vrt.map.fastly.net A | grep -E '^[0-9]+\.' | head -n 1)
+          if [ -n "$FASTLY_IP" ]; then
+            echo "$FASTLY_IP ondemand.vrtcdn.be" | sudo tee -a /etc/hosts
+          fi
+
       - name: Installeer yt-dlp (enkel nodig bij video/audio download)
         if: inputs.mode == 'download'
         run: |
           sudo curl -sSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux -o /usr/local/bin/yt-dlp
           sudo chmod a+rx /usr/local/bin/yt-dlp
+          command -v ffmpeg >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y ffmpeg)
 
       - name: Voer VRT MAX actie uit (Inladen of Downloaden)
         id: run_vrt
